@@ -28,7 +28,7 @@ art_cc_binary {
     defaults: ["art_defaults"],
     host_supported: true,
     compile_multilib: "both",
-
+    cflags: ["-O3"],
     srcs: ["dalvikvm.cc"],
     shared_libs: [
         "liblog",
