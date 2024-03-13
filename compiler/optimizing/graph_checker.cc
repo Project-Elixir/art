@@ -28,6 +28,7 @@
 #include "code_generator.h"
 #include "handle.h"
 #include "mirror/class.h"
+#include "nodes.h"
 #include "obj_ptr-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "subtype_check.h"
@@ -168,52 +169,68 @@ void GraphChecker::CheckGraphFlags() {
 void GraphChecker::VisitBasicBlock(HBasicBlock* block) {
   current_block_ = block;
 
-  // Use local allocator for allocating memory.
-  ScopedArenaAllocator allocator(GetGraph()->GetArenaStack());
+  {
+    // Use local allocator for allocating memory. We use C++ scopes (i.e. `{}`) to reclaim the
+    // memory as soon as possible, and to end the scope of this `ScopedArenaAllocator`.
+    ScopedArenaAllocator allocator(GetGraph()->GetArenaStack());
 
-  // Check consistency with respect to predecessors of `block`.
-  // Note: Counting duplicates with a sorted vector uses up to 6x less memory
-  // than ArenaSafeMap<HBasicBlock*, size_t> and also allows storage reuse.
-  ScopedArenaVector<HBasicBlock*> sorted_predecessors(allocator.Adapter(kArenaAllocGraphChecker));
-  sorted_predecessors.assign(block->GetPredecessors().begin(), block->GetPredecessors().end());
-  std::sort(sorted_predecessors.begin(), sorted_predecessors.end());
-  for (auto it = sorted_predecessors.begin(), end = sorted_predecessors.end(); it != end; ) {
-    HBasicBlock* p = *it++;
-    size_t p_count_in_block_predecessors = 1u;
-    for (; it != end && *it == p; ++it) {
-      ++p_count_in_block_predecessors;
+    {
+      // Check consistency with respect to predecessors of `block`.
+      // Note: Counting duplicates with a sorted vector uses up to 6x less memory
+      // than ArenaSafeMap<HBasicBlock*, size_t> and also allows storage reuse.
+      ScopedArenaVector<HBasicBlock*> sorted_predecessors(
+          allocator.Adapter(kArenaAllocGraphChecker));
+      sorted_predecessors.assign(block->GetPredecessors().begin(), block->GetPredecessors().end());
+      std::sort(sorted_predecessors.begin(), sorted_predecessors.end());
+      for (auto it = sorted_predecessors.begin(), end = sorted_predecessors.end(); it != end;) {
+        HBasicBlock* p = *it++;
+        size_t p_count_in_block_predecessors = 1u;
+        for (; it != end && *it == p; ++it) {
+          ++p_count_in_block_predecessors;
+        }
+        size_t block_count_in_p_successors =
+            std::count(p->GetSuccessors().begin(), p->GetSuccessors().end(), block);
+        if (p_count_in_block_predecessors != block_count_in_p_successors) {
+          AddError(StringPrintf(
+              "Block %d lists %zu occurrences of block %d in its predecessors, whereas "
+              "block %d lists %zu occurrences of block %d in its successors.",
+              block->GetBlockId(),
+              p_count_in_block_predecessors,
+              p->GetBlockId(),
+              p->GetBlockId(),
+              block_count_in_p_successors,
+              block->GetBlockId()));
+        }
+      }
     }
-    size_t block_count_in_p_successors =
-        std::count(p->GetSuccessors().begin(), p->GetSuccessors().end(), block);
-    if (p_count_in_block_predecessors != block_count_in_p_successors) {
-      AddError(StringPrintf(
-          "Block %d lists %zu occurrences of block %d in its predecessors, whereas "
-          "block %d lists %zu occurrences of block %d in its successors.",
-          block->GetBlockId(), p_count_in_block_predecessors, p->GetBlockId(),
-          p->GetBlockId(), block_count_in_p_successors, block->GetBlockId()));
-    }
-  }
 
-  // Check consistency with respect to successors of `block`.
-  // Note: Counting duplicates with a sorted vector uses up to 6x less memory
-  // than ArenaSafeMap<HBasicBlock*, size_t> and also allows storage reuse.
-  ScopedArenaVector<HBasicBlock*> sorted_successors(allocator.Adapter(kArenaAllocGraphChecker));
-  sorted_successors.assign(block->GetSuccessors().begin(), block->GetSuccessors().end());
-  std::sort(sorted_successors.begin(), sorted_successors.end());
-  for (auto it = sorted_successors.begin(), end = sorted_successors.end(); it != end; ) {
-    HBasicBlock* s = *it++;
-    size_t s_count_in_block_successors = 1u;
-    for (; it != end && *it == s; ++it) {
-      ++s_count_in_block_successors;
-    }
-    size_t block_count_in_s_predecessors =
-        std::count(s->GetPredecessors().begin(), s->GetPredecessors().end(), block);
-    if (s_count_in_block_successors != block_count_in_s_predecessors) {
-      AddError(StringPrintf(
-          "Block %d lists %zu occurrences of block %d in its successors, whereas "
-          "block %d lists %zu occurrences of block %d in its predecessors.",
-          block->GetBlockId(), s_count_in_block_successors, s->GetBlockId(),
-          s->GetBlockId(), block_count_in_s_predecessors, block->GetBlockId()));
+    {
+      // Check consistency with respect to successors of `block`.
+      // Note: Counting duplicates with a sorted vector uses up to 6x less memory
+      // than ArenaSafeMap<HBasicBlock*, size_t> and also allows storage reuse.
+      ScopedArenaVector<HBasicBlock*> sorted_successors(allocator.Adapter(kArenaAllocGraphChecker));
+      sorted_successors.assign(block->GetSuccessors().begin(), block->GetSuccessors().end());
+      std::sort(sorted_successors.begin(), sorted_successors.end());
+      for (auto it = sorted_successors.begin(), end = sorted_successors.end(); it != end;) {
+        HBasicBlock* s = *it++;
+        size_t s_count_in_block_successors = 1u;
+        for (; it != end && *it == s; ++it) {
+          ++s_count_in_block_successors;
+        }
+        size_t block_count_in_s_predecessors =
+            std::count(s->GetPredecessors().begin(), s->GetPredecessors().end(), block);
+        if (s_count_in_block_successors != block_count_in_s_predecessors) {
+          AddError(
+              StringPrintf("Block %d lists %zu occurrences of block %d in its successors, whereas "
+                           "block %d lists %zu occurrences of block %d in its predecessors.",
+                           block->GetBlockId(),
+                           s_count_in_block_successors,
+                           s->GetBlockId(),
+                           s->GetBlockId(),
+                           block_count_in_s_predecessors,
+                           block->GetBlockId()));
+        }
+      }
     }
   }
 
@@ -506,6 +523,26 @@ void GraphChecker::VisitMonitorOperation(HMonitorOperation* monitor_op) {
   flag_info_.seen_monitor_operation = true;
 }
 
+bool GraphChecker::ContainedInItsBlockList(HInstruction* instruction) {
+  HBasicBlock* block = instruction->GetBlock();
+  ScopedArenaSafeMap<HBasicBlock*, ScopedArenaHashSet<HInstruction*>>& instruction_set =
+      instruction->IsPhi() ? phis_per_block_ : instructions_per_block_;
+  auto map_it = instruction_set.find(block);
+  if (map_it == instruction_set.end()) {
+    // Populate extra bookkeeping.
+    map_it = instruction_set.insert(
+        {block, ScopedArenaHashSet<HInstruction*>(allocator_.Adapter(kArenaAllocGraphChecker))})
+        .first;
+    const HInstructionList& instruction_list = instruction->IsPhi() ?
+                                                   instruction->GetBlock()->GetPhis() :
+                                                   instruction->GetBlock()->GetInstructions();
+    for (HInstructionIterator list_it(instruction_list); !list_it.Done(); list_it.Advance()) {
+        map_it->second.insert(list_it.Current());
+    }
+  }
+  return map_it->second.find(instruction) != map_it->second.end();
+}
+
 void GraphChecker::VisitInstruction(HInstruction* instruction) {
   if (seen_ids_.IsBitSet(instruction->GetId())) {
     AddError(StringPrintf("Instruction id %d is duplicate in graph.",
@@ -528,23 +565,19 @@ void GraphChecker::VisitInstruction(HInstruction* instruction) {
                           instruction->GetBlock()->GetBlockId()));
   }
 
-  // Ensure the inputs of `instruction` are defined in a block of the graph.
+  // Ensure the inputs of `instruction` are defined in a block of the graph, and the entry in the
+  // use list is consistent.
   for (HInstruction* input : instruction->GetInputs()) {
     if (input->GetBlock() == nullptr) {
       AddError(StringPrintf("Input %d of instruction %d is not in any "
                             "basic block of the control-flow graph.",
                             input->GetId(),
                             instruction->GetId()));
-    } else {
-      const HInstructionList& list = input->IsPhi()
-          ? input->GetBlock()->GetPhis()
-          : input->GetBlock()->GetInstructions();
-      if (!list.Contains(input)) {
+    } else if (!ContainedInItsBlockList(input)) {
         AddError(StringPrintf("Input %d of instruction %d is not defined "
                               "in a basic block of the control-flow graph.",
                               input->GetId(),
                               instruction->GetId()));
-      }
     }
   }
 
@@ -552,10 +585,7 @@ void GraphChecker::VisitInstruction(HInstruction* instruction) {
   // and the entry in the use list is consistent.
   for (const HUseListNode<HInstruction*>& use : instruction->GetUses()) {
     HInstruction* user = use.GetUser();
-    const HInstructionList& list = user->IsPhi()
-        ? user->GetBlock()->GetPhis()
-        : user->GetBlock()->GetInstructions();
-    if (!list.Contains(user)) {
+    if (!ContainedInItsBlockList(user)) {
       AddError(StringPrintf("User %s:%d of instruction %d is not defined "
                             "in a basic block of the control-flow graph.",
                             user->DebugName(),
@@ -587,21 +617,38 @@ void GraphChecker::VisitInstruction(HInstruction* instruction) {
   }
 
   // Ensure 'instruction' has pointers to its inputs' use entries.
-  auto&& input_records = instruction->GetInputRecords();
-  for (size_t i = 0; i < input_records.size(); ++i) {
-    const HUserRecord<HInstruction*>& input_record = input_records[i];
-    HInstruction* input = input_record.GetInstruction();
-    if ((input_record.GetBeforeUseNode() == input->GetUses().end()) ||
-        (input_record.GetUseNode() == input->GetUses().end()) ||
-        !input->GetUses().ContainsNode(*input_record.GetUseNode()) ||
-        (input_record.GetUseNode()->GetIndex() != i)) {
-      AddError(StringPrintf("Instruction %s:%d has an invalid iterator before use entry "
-                            "at input %u (%s:%d).",
-                            instruction->DebugName(),
-                            instruction->GetId(),
-                            static_cast<unsigned>(i),
-                            input->DebugName(),
-                            input->GetId()));
+  {
+    auto&& input_records = instruction->GetInputRecords();
+    for (size_t i = 0; i < input_records.size(); ++i) {
+      const HUserRecord<HInstruction*>& input_record = input_records[i];
+      HInstruction* input = input_record.GetInstruction();
+
+      // Populate bookkeeping, if needed. See comment in graph_checker.h for uses_per_instruction_.
+      auto it = uses_per_instruction_.find(input->GetId());
+      if (it == uses_per_instruction_.end()) {
+        it = uses_per_instruction_
+                 .insert({input->GetId(),
+                          ScopedArenaSet<const art::HUseListNode<art::HInstruction*>*>(
+                              allocator_.Adapter(kArenaAllocGraphChecker))})
+                 .first;
+        for (auto&& use : input->GetUses()) {
+          it->second.insert(std::addressof(use));
+        }
+      }
+
+      if ((input_record.GetBeforeUseNode() == input->GetUses().end()) ||
+          (input_record.GetUseNode() == input->GetUses().end()) ||
+          (it->second.find(std::addressof(*input_record.GetUseNode())) == it->second.end()) ||
+          (input_record.GetUseNode()->GetIndex() != i)) {
+        AddError(
+            StringPrintf("Instruction %s:%d has an invalid iterator before use entry "
+                         "at input %u (%s:%d).",
+                         instruction->DebugName(),
+                         instruction->GetId(),
+                         static_cast<unsigned>(i),
+                         input->DebugName(),
+                         input->GetId()));
+      }
     }
   }
 
@@ -688,10 +735,59 @@ void GraphChecker::VisitInvoke(HInvoke* invoke) {
     }
     flag_info_.seen_always_throwing_invokes = true;
   }
+
+  // Check for intrinsics which should have been replaced by intermediate representation in the
+  // instruction builder.
+  switch (invoke->GetIntrinsic()) {
+    case Intrinsics::kIntegerRotateRight:
+    case Intrinsics::kLongRotateRight:
+    case Intrinsics::kIntegerRotateLeft:
+    case Intrinsics::kLongRotateLeft:
+    case Intrinsics::kIntegerCompare:
+    case Intrinsics::kLongCompare:
+    case Intrinsics::kIntegerSignum:
+    case Intrinsics::kLongSignum:
+    case Intrinsics::kFloatIsNaN:
+    case Intrinsics::kDoubleIsNaN:
+    case Intrinsics::kStringIsEmpty:
+    case Intrinsics::kUnsafeLoadFence:
+    case Intrinsics::kUnsafeStoreFence:
+    case Intrinsics::kUnsafeFullFence:
+    case Intrinsics::kJdkUnsafeLoadFence:
+    case Intrinsics::kJdkUnsafeStoreFence:
+    case Intrinsics::kJdkUnsafeFullFence:
+    case Intrinsics::kVarHandleFullFence:
+    case Intrinsics::kVarHandleAcquireFence:
+    case Intrinsics::kVarHandleReleaseFence:
+    case Intrinsics::kVarHandleLoadLoadFence:
+    case Intrinsics::kVarHandleStoreStoreFence:
+    case Intrinsics::kMathMinIntInt:
+    case Intrinsics::kMathMinLongLong:
+    case Intrinsics::kMathMinFloatFloat:
+    case Intrinsics::kMathMinDoubleDouble:
+    case Intrinsics::kMathMaxIntInt:
+    case Intrinsics::kMathMaxLongLong:
+    case Intrinsics::kMathMaxFloatFloat:
+    case Intrinsics::kMathMaxDoubleDouble:
+    case Intrinsics::kMathAbsInt:
+    case Intrinsics::kMathAbsLong:
+    case Intrinsics::kMathAbsFloat:
+    case Intrinsics::kMathAbsDouble:
+      AddError(
+          StringPrintf("The graph contains an instrinsic which should have been replaced in the "
+                       "instruction builder: %s:%d in block %d.",
+                       invoke->DebugName(),
+                       invoke->GetId(),
+                       invoke->GetBlock()->GetBlockId()));
+      break;
+    default:
+      break;
+  }
 }
 
 void GraphChecker::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
-  // We call VisitInvoke and not VisitInstruction to de-duplicate the always throwing code check.
+  // We call VisitInvoke and not VisitInstruction to de-duplicate the common code: always throwing
+  // and instrinsic checks.
   VisitInvoke(invoke);
 
   if (invoke->IsStaticWithExplicitClinitCheck()) {
@@ -944,8 +1040,7 @@ static bool IsSameSizeConstant(const HInstruction* insn1, const HInstruction* in
 static bool IsConstantEquivalent(const HInstruction* insn1,
                                  const HInstruction* insn2,
                                  BitVector* visited) {
-  if (insn1->IsPhi() &&
-      insn1->AsPhi()->IsVRegEquivalentOf(insn2)) {
+  if (insn1->IsPhi() && insn1->AsPhi()->IsVRegEquivalentOf(insn2)) {
     HConstInputsRef insn1_inputs = insn1->GetInputs();
     HConstInputsRef insn2_inputs = insn2->GetInputs();
     if (insn1_inputs.size() != insn2_inputs.size()) {
